@@ -61,8 +61,8 @@ def save_to_csv(json_data, csv_filename, mode='a'):
 
 # Hàm chính để chạy chương trình
 def main():
-    start_date = "2020-01"
-    end_date = "2024-07"
+    start_date = "2019-01"
+    end_date = "2024-08"
     offset = 0
     length = 5000
     csv_filename = 'crude_oil_imports.csv'
@@ -72,7 +72,7 @@ def main():
 
     # Biến đếm tổng số hàng đã tải
     total_rows = 0
-    max_rows = 100000  # Giới hạn tổng số hàng
+    max_rows = 120000  # Giới hạn tổng số hàng
     
     while total_rows < max_rows:
         url = create_url(start_date, end_date, offset, length)
