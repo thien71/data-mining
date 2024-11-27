@@ -1,104 +1,141 @@
 import requests
-import csv
+import os
+import mysql.connector
+import datetime
 
-# Biến toàn cục chứa API Key và URL cơ bản
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'port': int(os.getenv('DB_PORT', 3306)),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', '1234'),
+    'database': os.getenv('DB_NAME', 'nuclear_outages')
+}
+
 API_KEY = 'p7CVKPTamXQJchOn1d3C6mksnpNvFommnZnLHwRx'
-BASE_URL = 'https://api.eia.gov/v2/crude-oil-imports/data/'
 
-# Hàm tạo URL truy vấn
-def create_url(start_date, end_date, offset=0, length=5000):
-    url = (f"{BASE_URL}?api_key={API_KEY}"
-           f"&frequency=monthly"
-           f"&data[0]=quantity"
-           f"&start={start_date}&end={end_date}"
-           f"&sort[0][column]=period&sort[0][direction]=desc"
-           f"&offset={offset}&length={length}")
-    return url
+API_URLS = {
+    'national_outages': 'https://api.eia.gov/v2/nuclear-outages/us-nuclear-outages/data/',
+    'facility_outages': 'https://api.eia.gov/v2/nuclear-outages/facility-nuclear-outages/data/',
+    'generator_outages': 'https://api.eia.gov/v2/nuclear-outages/generator-nuclear-outages/data/'
+}
 
-# Hàm cào dữ liệu từ API
-def fetch_data_from_api(url):
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Failed to fetch data. Status code: {response.status_code}")
-        return None
+def create_url(api_url, start_date, end_date, offset=0, length=5000):
+    return f"{api_url}?api_key={API_KEY}&frequency=daily&data[0]=capacity&data[1]=outage&data[2]=percentOutage&start={start_date}&end={end_date}&sort[0][column]=period&sort[0][direction]=desc&offset={offset}&length={length}"
 
-# Hàm xử lý dữ liệu JSON và lưu vào file CSV
-def save_to_csv(json_data, csv_filename, mode='a'):
-    with open(csv_filename, mode=mode, newline='') as file:
-        writer = csv.writer(file)
-        # Chỉ ghi tiêu đề khi mở file ở chế độ ghi ('w')
-        if mode == 'w':
-            writer.writerow(['Period', 'Origin Country', 'Origin ID', 'Origin Type', 'Origin Type Name',
-                             'Destination ID', 'Destination Name', 'Destination Type', 'Destination Type Name',
-                             'Grade ID', 'Grade Name', 'Quantity', 'Quantity Units'])
-        
-        row_count = 0
-        # Kiểm tra nếu 'response' có trong dữ liệu JSON và có dữ liệu 'data'
-        if json_data and 'response' in json_data and 'data' in json_data['response']:
-            for entry in json_data['response']['data']:
-                writer.writerow([
-                    entry['period'],
-                    entry['originName'],
-                    entry['originId'],
-                    entry['originType'],
-                    entry['originTypeName'],
-                    entry['destinationId'],
-                    entry['destinationName'],
-                    entry['destinationType'],
-                    entry['destinationTypeName'],
-                    entry['gradeId'],
-                    entry['gradeName'],
-                    entry['quantity'],
-                    entry['quantity-units']
-                ])
-                row_count += 1
-        else:
-            print("No data found in the response or response structure has changed.")
-    
-    return row_count
-
-# Hàm chính để chạy chương trình
-def main():
-    start_date = "2019-01"
-    end_date = "2024-08"
+def fetch_data_from_api(api_url, start_date, end_date):
     offset = 0
     length = 5000
-    csv_filename = 'crude_oil_imports.csv'
+    all_data = []
     
-    # Xóa file cũ nếu tồn tại và ghi dòng tiêu đề
-    save_to_csv({}, csv_filename, mode='w')
-
-    # Biến đếm tổng số hàng đã tải
-    total_rows = 0
-    max_rows = 120000  # Giới hạn tổng số hàng
+    while True:
+        url = create_url(api_url, start_date, end_date, offset, length)
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'response' in data and 'data' in data['response']:
+                page_data = data['response']['data']
+                if page_data:
+                    all_data.extend(page_data)  # Thêm dữ liệu vào danh sách
+                if len(page_data) < length:
+                    break  # Nếu dữ liệu ít hơn limit thì dừng lại
+                else:
+                    offset += length  # Lặp qua trang tiếp theo
+            else:
+                break
+        else:
+            print(f"Failed to fetch data from {url}. Status code: {response.status_code}")
+            break
     
-    while total_rows < max_rows:
-        url = create_url(start_date, end_date, offset, length)
-        print("Requesting URL:", url)  # In URL để kiểm tra
+    return all_data
 
-        # Gửi yêu cầu và lấy dữ liệu từ API
-        json_data = fetch_data_from_api(url)
+def save_to_mysql(json_data, table_name):
+    connection = mysql.connector.connect(**DB_CONFIG)
+    cursor = connection.cursor()
 
-        # Kiểm tra nếu không có dữ liệu để tải thêm
-        if not json_data or 'response' not in json_data or 'data' not in json_data['response']:
-            print("No more data to fetch or error in response structure.")
-            break
+    # SQL query based on table name
+    sql = get_insert_sql(table_name)
 
-        # Lưu dữ liệu và đếm số hàng mới thêm
-        rows_added = save_to_csv(json_data, csv_filename, mode='a')
-        total_rows += rows_added
+    row_count = 0
+    if isinstance(json_data, list):
+        data = json_data  # Nếu là list, không cần gọi .get() nữa
+    else:
+        data = json_data.get('response', {}).get('data', [])
 
-        # Tăng offset để lấy trang dữ liệu tiếp theo
-        offset += length
+    for entry in data:
+        try:
+            cursor.execute(sql, extract_values(entry, table_name))
+            row_count += 1
+            print(f"Inserted {row_count} row into {table_name} - Period: {entry['period']}")  # Log after each insert
+        except Exception as e:
+            print(f"Error inserting entry: {entry}, Error: {e}")
+    
+    connection.commit()
+    cursor.close()
+    connection.close()
+    print(f"Inserted {row_count} rows into {table_name}.")
 
-        # Kiểm tra nếu đã đạt đến giới hạn hàng
-        if total_rows >= max_rows:
-            print(f"Reached row limit of {max_rows}. Stopping download.")
-            break
+def get_insert_sql(table_name):
+    if table_name == 'national_outages':
+        return """INSERT INTO national_outages (period, capacity, outage, percent_outage, capacity_units, outage_units, percent_outage_units)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s)"""
+    elif table_name == 'facility_outages':
+        return """INSERT INTO facility_outages (period, facility_id, facility_name, capacity, outage, percent_outage, capacity_units, outage_units, percent_outage_units)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+    elif table_name == 'generator_outages':
+        return """INSERT INTO generator_outages (period, facility_id, facility_name, generator_id, percent_outage, percent_outage_units)
+                 VALUES (%s, %s, %s, %s, %s, %s)"""
+    return None
 
-    print(f"Total rows saved: {total_rows}")
+def extract_values(entry, table_name):
+    if table_name == 'national_outages':
+        return (
+            entry['period'],
+            entry.get('capacity', None),
+            entry.get('outage', None),
+            entry.get('percentOutage', None),
+            entry.get('capacity-units', None),
+            entry.get('outage-units', None),
+            entry.get('percentOutage-units', None)
+        )
+    elif table_name == 'facility_outages':
+        return (
+            entry['period'],
+            entry.get('facility', None),  
+            entry.get('facilityName', None),
+            entry.get('capacity', None),
+            entry.get('outage', None),
+            entry.get('percentOutage', None),
+            entry.get('capacity-units', None),
+            entry.get('outage-units', None),
+            entry.get('percentOutage-units', None)
+        )
+    elif table_name == 'generator_outages':
+        return (
+            entry['period'],
+            entry.get('facility', None),  
+            entry.get('facilityName', None),
+            entry.get('generator', None),
+            entry.get('percentOutage', None),
+            entry.get('percentOutage-units', None)
+        )
+    return None
+
+def process_data(api_url, start_date, end_date, table_name):
+    data = fetch_data_from_api(api_url, start_date, end_date)
+    if data:
+        save_to_mysql(data, table_name)
+
+def first_run():
+    start_date = '2023-01-01'
+    end_date = datetime.datetime.now().strftime('%Y-%m-%d')
+
+    for api_name, api_url in API_URLS.items():
+        print(f"Fetching data from {api_name}...")
+        process_data(api_url, start_date, end_date, api_name)
+
+def main():
+    first_run()
 
 if __name__ == "__main__":
     main()
