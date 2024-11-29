@@ -24,12 +24,12 @@ CREATE TABLE IF NOT EXISTS facility_outages (
     percent_outage_units VARCHAR(50)
 );
 
-CREATE TABLE IF NOT EXISTS generator_outages (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    period DATE NOT NULL,
-    facility_id INT,
-    facility_name VARCHAR(255),
-    generator_id INT,
-    percent_outage DECIMAL(5, 2),
-    percent_outage_units VARCHAR(50)
-);
+-- CREATE TABLE IF NOT EXISTS generator_outages (
+--     id INT AUTO_INCREMENT PRIMARY KEY,
+--     period DATE NOT NULL,
+--     facility_id INT,
+--     facility_name VARCHAR(255),
+--     generator_id INT,
+--     percent_outage DECIMAL(5, 2),
+--     percent_outage_units VARCHAR(50)
+-- );

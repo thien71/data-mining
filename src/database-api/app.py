@@ -1,22 +1,28 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
+from fastapi.responses import JSONResponse
 import mysql.connector
+import pandas as pd
+from statsmodels.tsa.seasonal import seasonal_decompose
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import os
+import datetime
+import asyncio
 
 app = FastAPI()
 
-# Cấu hình CORS
 origins = [
-    "http://localhost:5173",  # Địa chỉ frontend của bạn
-    "http://127.0.0.1:5173",  # Địa chỉ loopback frontend
+    "http://localhost:5173",  
+    "http://127.0.0.1:5173",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Cho phép các nguồn gốc (frontend)
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Cho phép tất cả phương thức (GET, POST,...)
-    allow_headers=["*"],  # Cho phép tất cả header
+    allow_methods=["*"], 
+    allow_headers=["*"], 
 )
 
 DB_CONFIG = {
@@ -27,68 +33,100 @@ DB_CONFIG = {
     'database': 'nuclear_outages'
 }
 
-@app.get("/api/national_outages")
-async def get_national_outages():
+OUTAGE_FILE = "outage_clusters.csv"
+SEASON_FILE = "season_counts.csv"
+SCHEDULE_FILE = "schedule_time.txt"
+HISTORY_FILE = 'history_clustering.txt'
+
+def fetch_data_from_db(query: str):
+    """Lấy dữ liệu từ DB"""
     try:
         connection = mysql.connector.connect(**DB_CONFIG)
         cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM national_outages")
-        results = cursor.fetchall()
-        print(f"Fetched {len(results)} records from the database.")
-        return results
+        cursor.execute(query)
+        result = cursor.fetchall()
+        return result
     except Exception as e:
         print(f"Error fetching data: {e}")
-        return {"error": str(e)}
+        return []
     finally:
-        cursor.close()
         connection.close()
+
+def process_trend(data):
+    """Tính toán và trả về trend từ dữ liệu"""
+    df = pd.DataFrame(data)
+    df['period'] = pd.to_datetime(df['period'])
+    df.set_index('period', inplace=True)
+    
+    decomposition = seasonal_decompose(df['percent_outage'], model='multiplicative', period=12)
+    trend = decomposition.trend.dropna()
+    return trend
+
+def process_seasonal(data):
+    """Tính toán và trả về seasonal từ dữ liệu"""
+    df = pd.DataFrame(data)
+    df['period'] = pd.to_datetime(df['period'])
+    df.set_index('period', inplace=True)
+    
+    decomposition = seasonal_decompose(df['percent_outage'], model='multiplicative', period=12)
+    seasonal = decomposition.seasonal.dropna()
+    return seasonal
+
+@app.get("/api/national_outages")
+async def get_national_outages():
+    query = "SELECT * FROM national_outages"
+    data = fetch_data_from_db(query)
+    
+    return data
 
 @app.get("/api/facility_outages")
 async def get_facility_outages():
-    try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM facility_outages")
-        results = cursor.fetchall()
-        print(f"Fetched {len(results)} records from the database.")
-        return results
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        return {"error": str(e)}
-    finally:
-        cursor.close()
-        connection.close()
+    query = "SELECT * FROM facility_outages"
+    data = fetch_data_from_db(query)
+    
+    return data
 
-@app.get("/api/generator_outages")
-async def get_generator_outages():
-    try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM generator_outages")
-        results = cursor.fetchall()
-        print(f"Fetched {len(results)} records from the database.")
-        return results
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        return {"error": str(e)}
-    finally:
-        cursor.close()
-        connection.close()
-
-@app.get("/api/time_series")
-async def get_time_series():
+@app.get("/api/time_series/day")
+async def get_time_series_day(year: int, month: int):
     try:
         connection = mysql.connector.connect(**DB_CONFIG)
         cursor = connection.cursor(dictionary=True)
 
-        # Query to get the average percent outage by month from national_outages
+        # Query to get the daily percent outage for the given month and year
         query = """
-            SELECT DATE_FORMAT(period, '%Y-%m') AS month, 
+            SELECT DATE_FORMAT(period, '%Y-%m-%d') AS day, 
+                   percent_outage
+            FROM national_outages
+            WHERE YEAR(period) = %s AND MONTH(period) = %s
+            ORDER BY period
+        """
+        cursor.execute(query, (year, month))
+        result = cursor.fetchall()
+
+        print(f"Fetched {len(result)} records.")
+        return result
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return {"error": str(e)}
+    finally:
+        cursor.close()
+        connection.close()
+
+@app.get("/api/time_series/month")
+async def get_time_series_month(year: int):
+    try:
+        connection = mysql.connector.connect(**DB_CONFIG)
+        cursor = connection.cursor(dictionary=True)
+
+        query = """
+            SELECT MONTH(period) AS month, 
                    AVG(percent_outage) AS avg_percent_outage
             FROM national_outages
-            GROUP BY month
+            WHERE YEAR(period) = %s
+            GROUP BY MONTH(period)
+            ORDER BY MONTH(period)
         """
-        cursor.execute(query)
+        cursor.execute(query, (year,))
         result = cursor.fetchall()
 
         print(f"Fetched {len(result)} records.")
@@ -101,184 +139,151 @@ async def get_time_series():
         connection.close()
 
 @app.get("/api/trending")
-async def get_trending():
-    try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
-
-        # Query to get the average percent outage for each month across all years
-        query = """
-            SELECT MONTH(period) AS month, 
-                   AVG(percent_outage) AS avg_percent_outage
-            FROM national_outages
-            GROUP BY month
-            ORDER BY month
-        """
-        cursor.execute(query)
-        result = cursor.fetchall()
-
-        trending_data = [{"month": i, "avg_percent_outage": 0.0} for i in range(1, 13)]
-        
-        for row in result:
-            month_index = row['month'] - 1 
-            trending_data[month_index]["avg_percent_outage"] = row['avg_percent_outage']
-        
-        print(f"Fetched {len(result)} records.")
-        return trending_data
-
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        return {"error": str(e)}
-    finally:
-        cursor.close()
-        connection.close()
+async def get_trend():
+    """API trả về dữ liệu trend"""
+    query = "SELECT period, percent_outage FROM national_outages ORDER BY period"
+    data = fetch_data_from_db(query)
+    trend = process_trend(data)
+    
+    trend_data = [{"date": str(date), "value": value} for date, value in trend.items()]
+    
+    return {"trend": trend_data}
 
 @app.get("/api/seasonal")
 async def get_seasonal():
-    try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
-
-        # Query to get the average percent outage for each season
-        query = """
-            SELECT 
-                CASE 
-                    WHEN MONTH(period) BETWEEN 3 AND 5 THEN 'Spring'
-                    WHEN MONTH(period) BETWEEN 6 AND 8 THEN 'Summer'
-                    WHEN MONTH(period) BETWEEN 9 AND 11 THEN 'Fall'
-                    ELSE 'Winter'  -- Includes December, January, February
-                END AS season,
-                AVG(percent_outage) AS avg_percent_outage
-            FROM national_outages
-            GROUP BY season
-            ORDER BY FIELD(season, 'Spring', 'Summer', 'Fall', 'Winter')
-        """
-        cursor.execute(query)
-        result = cursor.fetchall()
-
-        # Prepare the data to return in a consistent format
-        seasonal_data = {
-            "Spring": 0.0,
-            "Summer": 0.0,
-            "Fall": 0.0,
-            "Winter": 0.0
-        }
-
-        for row in result:
-            seasonal_data[row['season']] = row['avg_percent_outage']
-
-        print(f"Fetched {len(result)} records.")
-        return seasonal_data
-
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        return {"error": str(e)}
-    finally:
-        cursor.close()
-        connection.close()
-
+    """API trả về dữ liệu seasonal"""
+    query = "SELECT period, percent_outage FROM national_outages ORDER BY period"
+    data = fetch_data_from_db(query)
+    seasonal = process_seasonal(data)
+    
+    seasonal_data = [{"date": str(date), "value": value} for date, value in seasonal.items()]
+    
+    return {"seasonal": seasonal_data}
 
 @app.get("/api/correlation_matrix")
 async def get_correlation_matrix():
+    query = """
+        SELECT period, capacity, outage, percent_outage
+        FROM national_outages
+    """
+    # query = """
+    #     SELECT period, facility_id, facility_name, capacity, outage, percent_outage
+    #     FROM facility_outages
+    # """
+    data = fetch_data_from_db(query)
+    
+    if not data:
+        return JSONResponse(status_code=404, content={"message": "No data found"})
+
+    df = pd.DataFrame(data)
+    df['percent_outage'] = (df['outage'] / df['capacity']) * 100
+    correlation_matrix = df[['capacity', 'outage', 'percent_outage']].corr()
+    correlation_matrix_dict = correlation_matrix.to_dict()
+
+    return JSONResponse(content=correlation_matrix_dict)
+
+# ----------------------------------------------------------------
+
+def append_to_history(message):
     try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
-
-        # Query to get data from all three tables for correlation analysis
-        query = """
-            SELECT
-                n.percent_outage AS national_percent_outage,
-                f.percent_outage AS facility_percent_outage,
-                g.percent_outage AS generator_percent_outage,
-                n.capacity AS national_capacity,
-                f.capacity AS facility_capacity,
-                n.outage AS national_outage,
-                f.outage AS facility_outage,
-                g.percent_outage AS generator_percent_outage
-            FROM
-                national_outages n
-                JOIN facility_outages f ON MONTH(n.period) = MONTH(f.period) AND YEAR(n.period) = YEAR(f.period)
-                LEFT JOIN generator_outages g ON MONTH(n.period) = MONTH(g.period) AND YEAR(n.period) = YEAR(g.period)
-        """
-        cursor.execute(query)
-        result = cursor.fetchall()
-
-        # Convert result into a pandas DataFrame for correlation calculation
-        df = pd.DataFrame(result)
-
-        # Calculate correlation matrix
-        correlation_matrix = df.corr()
-
-        # Convert the correlation matrix to a dictionary or JSON-friendly format
-        correlation_matrix_dict = correlation_matrix.to_dict()
-
-        print(f"Fetched {len(result)} records.")
-        return correlation_matrix_dict
-
+        with open(HISTORY_FILE, 'a') as file:
+            file.write(f"{datetime.datetime.now()} - {message}\n")
     except Exception as e:
-        print(f"Error fetching data: {e}")
-        return {"error": str(e)}
-    finally:
-        cursor.close()
-        connection.close()
+        print(f"Error appending to history file: {e}")
 
-@app.get("/api/spider")
-async def get_spider():
+def get_schedule_time():
     try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
-
-        # Query to get average outage percent by season and year
-        query = """
-            SELECT
-                YEAR(period) AS year,
-                CASE
-                    WHEN MONTH(period) BETWEEN 3 AND 5 THEN 'Spring'
-                    WHEN MONTH(period) BETWEEN 6 AND 8 THEN 'Summer'
-                    WHEN MONTH(period) BETWEEN 9 AND 11 THEN 'Fall'
-                    WHEN MONTH(period) = 12 OR MONTH(period) BETWEEN 1 AND 2 THEN 'Winter'
-                END AS season,
-                AVG(percent_outage) AS avg_percent_outage
-            FROM national_outages
-            WHERE YEAR(period) BETWEEN 2020 AND 2024
-            GROUP BY YEAR(period), season
-            ORDER BY year, FIELD(season, 'Winter', 'Spring', 'Summer', 'Fall');
-        """
-        cursor.execute(query)
-        result = cursor.fetchall()
-
-        # Process data into a format suitable for Spider Chart
-        data_by_year = {}
-        for row in result:
-            year = row['year']
-            season = row['season']
-            avg_percent_outage = row['avg_percent_outage']
-
-            if year not in data_by_year:
-                data_by_year[year] = {'Spring': 0, 'Summer': 0, 'Fall': 0, 'Winter': 0}
-            
-            data_by_year[year][season] = avg_percent_outage
-
-        print(f"Fetched {len(result)} records.")
-        return data_by_year
-
+        with open(SCHEDULE_FILE, "r") as file:
+            time_str = file.read().strip()
+            hour, minute = map(int, time_str.split(":"))
+            message = f"Schedule time read from file: {hour:02d}:{minute:02d}"
+            print(message)
+            append_to_history(message)
+            return datetime.time(hour=hour, minute=minute)
     except Exception as e:
-        print(f"Error fetching data: {e}")
-        return {"error": str(e)}
-    finally:
-        cursor.close()
-        connection.close()
+        error_message = f"Error reading schedule time: {e}"
+        print(error_message)
+        return datetime.time(hour=22, minute=15)
 
-@app.get("/api/prediction")
-async def get_prediction():
+async def daily_scheduler():
+    while True:
+        now = datetime.datetime.now()
+        scheduled_time = get_schedule_time()
+        target_time = datetime.datetime.combine(now.date(), scheduled_time)
+
+        if now > target_time:
+            target_time += datetime.timedelta(days=1)
+
+        sleep_duration = (target_time - now).total_seconds()
+        print(f"Next clustering scheduled at: {target_time}")
+        
+        await asyncio.sleep(sleep_duration)
+        
+        print("Running K-Means clustering...") 
+        run_kmeans_clustering()
+
+@app.on_event("startup")
+async def startup_event():
+    print("Running K-Means clustering immediately...")
+    run_kmeans_clustering()
+
+    asyncio.create_task(daily_scheduler())
+    print("Starting API server...")
+
+
+def run_kmeans_clustering():
+    query = "SELECT period, percent_outage FROM national_outages ORDER BY period"
+    data = fetch_data_from_db(query)
+
+    df = pd.DataFrame(data)
+
+    X = df[["percent_outage"]]
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    kmeans = KMeans(n_clusters=4, random_state=0)
+    df["cluster"] = kmeans.fit_predict(X_scaled)
+
     try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = connection.cursor(dictionary=True)
-
-
+        df.to_csv(OUTAGE_FILE, index=False)
     except Exception as e:
-        print(f"Error fetching data: {e}")
-        return {"error": str(e)}
-    finally:
-        cursor.close()
-        connection.close()
+        print(f"Error saving to CSV: {e}")
+
+    generate_season_data(df)
+    print(f"[{datetime.datetime.now()}] Clustering completed.")
+
+
+def generate_season_data(df):
+    df['period'] = pd.to_datetime(df['period']).dt.strftime('%Y-%m-%d')
+    df['year'] = pd.to_datetime(df['period']).dt.year
+    df['season'] = df['cluster'].map({
+        0: 'Low', 
+        1: 'High', 
+        2: 'Very low', 
+        3: 'Medium'
+    })
+
+    season_counts = df.groupby(['year', 'season']).size().unstack(fill_value=0)
+    season_counts = season_counts.reset_index()
+    season_counts.to_csv(SEASON_FILE, index=False)
+
+
+@app.get("/api/clusters/chart")
+async def get_cluster_chart():
+    """API trả về dữ liệu để vẽ biểu đồ phân cụm."""
+    if not os.path.exists(OUTAGE_FILE):
+        return JSONResponse(status_code=404, content={"message": "No clustering data found."})
+
+    df = pd.read_csv(OUTAGE_FILE)
+    chart_data = df[["period", "percent_outage", "cluster"]].to_dict(orient="records")
+    return JSONResponse(content=chart_data)
+
+
+@app.get("/api/seasons/chart")
+async def get_season_chart():
+    """API trả về dữ liệu để vẽ biểu đồ số ngày theo mùa."""
+    if not os.path.exists(SEASON_FILE):
+        return JSONResponse(status_code=404, content={"message": "No season data found."})
+
+    df = pd.read_csv(SEASON_FILE)
+    return JSONResponse(content=df.to_dict(orient="records"))
