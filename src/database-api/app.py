@@ -3,12 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import mysql.connector
 import pandas as pd
+import numpy as np
+from decimal import Decimal
 from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import os
 import datetime
 import asyncio
+from pydantic import BaseModel
+from sklearn.linear_model import LinearRegression
+
 
 app = FastAPI()
 
@@ -222,13 +227,13 @@ async def daily_scheduler():
         print("Running K-Means clustering...") 
         run_kmeans_clustering()
 
-@app.on_event("startup")
-async def startup_event():
-    print("Running K-Means clustering immediately...")
-    run_kmeans_clustering()
+# @app.on_event("startup")
+# async def startup_event():
+#     print("Running K-Means clustering immediately...")
+#     run_kmeans_clustering()
 
-    asyncio.create_task(daily_scheduler())
-    print("Starting API server...")
+#     asyncio.create_task(daily_scheduler())
+#     print("Starting API server...")
 
 
 def run_kmeans_clustering():
@@ -287,3 +292,53 @@ async def get_season_chart():
 
     df = pd.read_csv(SEASON_FILE)
     return JSONResponse(content=df.to_dict(orient="records"))
+
+class PredictionResult(BaseModel):
+    predicted_date: str
+    predicted_percent_outage: float
+    df_result: dict
+model = LinearRegression()
+@app.get("/api/predict-outage", response_model=PredictionResult)
+def predict_outage():
+    # Fetch data
+    query = "SELECT * FROM national_outages ORDER BY period"
+    data = fetch_data_from_db(query)
+    for row in data:
+        for key, value in row.items():
+            if isinstance(value, Decimal):
+                row[key] = float(value)
+    df = pd.DataFrame(data)
+
+    # Process data
+    df['date'] = pd.to_datetime(df['period'])
+    df = df.sort_values('date')
+    df['avg_outage_7d'] = df['outage'].rolling(window=7).mean()
+    df['avg_percent_outage_7d'] = df['percent_outage'].rolling(window=7).mean()
+    df = df.dropna()
+
+    # Train model
+    X = df[['avg_outage_7d', 'avg_percent_outage_7d']].values
+    y = df['percent_outage'].values
+    model.fit(X, y)
+
+    # Predict next day
+    last_row = df.iloc[-1]
+    next_day_features = np.array([[last_row['avg_outage_7d'], last_row['avg_percent_outage_7d']]])
+    predicted_percent_outage = model.predict(next_day_features)[0]
+    predicted_date = last_row['date'] + pd.Timedelta(days=1)
+
+    # Prepare result DataFrame
+    df_result = pd.DataFrame({
+        'date': df['date'].dt.strftime('%Y-%m-%d').tolist() + [predicted_date.strftime('%Y-%m-%d')],
+        'percent_outage': df['percent_outage'].round(2).tolist() + [round(predicted_percent_outage, 2)],
+    })
+
+    # Serialize DataFrame to list of dicts
+    result_data = {
+        "predicted_date": predicted_date.strftime('%Y-%m-%d'),
+        "predicted_percent_outage": round(float(predicted_percent_outage), 2),
+        "df_result": df_result.to_dict(orient="records"),
+    }
+
+    # Return response
+    return JSONResponse(content=result_data)

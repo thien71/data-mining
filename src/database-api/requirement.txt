@@ -4,3 +4,5 @@ mysql-connector-python
 statsmodels
 pandas
 scikit-learn
+pydantic
+numpy
