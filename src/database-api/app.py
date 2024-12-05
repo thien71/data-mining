@@ -1,7 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import mysql.connector
+import requests
 import pandas as pd
 import numpy as np
 from decimal import Decimal
@@ -13,7 +14,6 @@ import datetime
 import asyncio
 from pydantic import BaseModel
 from sklearn.linear_model import LinearRegression
-
 
 app = FastAPI()
 
@@ -77,16 +77,102 @@ def process_seasonal(data):
     seasonal = decomposition.seasonal.dropna()
     return seasonal
 
-@app.get("/api/national_outages")
-async def get_national_outages():
-    query = "SELECT * FROM national_outages"
-    data = fetch_data_from_db(query)
-    
-    return data
 
-@app.get("/api/facility_outages")
+API_KEY = 'p7CVKPTamXQJchOn1d3C6mksnpNvFommnZnLHwRx'
+
+API_URLS = {
+    'national_outages': 'https://api.eia.gov/v2/nuclear-outages/us-nuclear-outages/data/',
+}
+
+app = FastAPI()
+
+# CORS setup (optional)
+origins = [
+    "http://localhost:5173",  
+    "http://127.0.0.1:5173",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/api/crawl")
+async def crawl():
+    try:
+        start_date = '2020-01-01'  # Static start date (can be modified if needed)
+        end_date = datetime.datetime.now().strftime('%Y-%m-%d')
+
+        all_data = []
+
+        # Step 2: Fetch data from the API
+        for api_name, api_url in API_URLS.items():
+            print(f"Fetching data from {api_name}...")
+            offset = 0
+            length = 5000
+            while True:
+                url = f"{api_url}?api_key={API_KEY}&frequency=daily&data[0]=capacity&data[1]=outage&data[2]=percentOutage&start={start_date}&end={end_date}&sort[0][column]=period&sort[0][direction]=desc&offset={offset}&length={length}"
+                response = requests.get(url)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'response' in data and 'data' in data['response']:
+                        page_data = data['response']['data']
+                        if page_data:
+                            all_data.extend(page_data)
+                        if len(page_data) < length:
+                            break
+                        else:
+                            offset += length
+                    else:
+                        break
+                else:
+                    print(f"Failed to fetch data from {url}. Status code: {response.status_code}")
+                    break
+        
+        # Step 3: Save fetched data to MySQL
+        if all_data:
+            connection = mysql.connector.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+            
+            # SQL insert statement
+            insert_sql = """INSERT INTO national_outages (period, capacity, outage, percent_outage, capacity_units, outage_units, percent_outage_units)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)"""
+            row_count = 0
+
+            for entry in all_data:
+                try:
+                    cursor.execute(insert_sql, (
+                        entry['period'],
+                        entry.get('capacity', None),
+                        entry.get('outage', None),
+                        entry.get('percentOutage', None),
+                        entry.get('capacity-units', None),
+                        entry.get('outage-units', None),
+                        entry.get('percentOutage-units', None)
+                    ))
+                    row_count += 1
+                    print(f"Inserted {row_count} row into national_outages - Period: {entry['period']}")
+                except Exception as e:
+                    print(f"Error inserting entry: {entry}, Error: {e}")
+
+            connection.commit()
+            cursor.close()
+            connection.close()
+            print(f"Inserted {row_count} rows into national_outages.")
+
+        return {"message": "Data fetch and save completed successfully."}
+
+    except Exception as e:
+        print(f"Error during data fetch: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error during data fetch: {str(e)}")
+    
+
+@app.get("/api/national_outages")
 async def get_facility_outages():
-    query = "SELECT * FROM facility_outages"
+    query = "SELECT * FROM national_outages"
     data = fetch_data_from_db(query)
     
     return data
@@ -171,10 +257,6 @@ async def get_correlation_matrix():
         SELECT period, capacity, outage, percent_outage
         FROM national_outages
     """
-    # query = """
-    #     SELECT period, facility_id, facility_name, capacity, outage, percent_outage
-    #     FROM facility_outages
-    # """
     data = fetch_data_from_db(query)
     
     if not data:
@@ -210,30 +292,22 @@ def get_schedule_time():
         print(error_message)
         return datetime.time(hour=22, minute=15)
 
-async def daily_scheduler():
-    while True:
-        now = datetime.datetime.now()
-        scheduled_time = get_schedule_time()
-        target_time = datetime.datetime.combine(now.date(), scheduled_time)
+# async def daily_scheduler():
+#     while True:
+#         now = datetime.datetime.now()
+#         scheduled_time = get_schedule_time()
+#         target_time = datetime.datetime.combine(now.date(), scheduled_time)
 
-        if now > target_time:
-            target_time += datetime.timedelta(days=1)
+#         if now > target_time:
+#             target_time += datetime.timedelta(days=1)
 
-        sleep_duration = (target_time - now).total_seconds()
-        print(f"Next clustering scheduled at: {target_time}")
+#         sleep_duration = (target_time - now).total_seconds()
+#         print(f"Next clustering scheduled at: {target_time}")
         
-        await asyncio.sleep(sleep_duration)
+#         await asyncio.sleep(sleep_duration)
         
-        print("Running K-Means clustering...") 
-        run_kmeans_clustering()
-
-# @app.on_event("startup")
-# async def startup_event():
-#     print("Running K-Means clustering immediately...")
-#     run_kmeans_clustering()
-
-#     asyncio.create_task(daily_scheduler())
-#     print("Starting API server...")
+#         print("Running K-Means clustering...") 
+#         run_kmeans_clustering()
 
 
 def run_kmeans_clustering():

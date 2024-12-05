@@ -3,6 +3,10 @@ import os
 import mysql.connector
 import datetime
 
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
     'port': int(os.getenv('DB_PORT', 3306)),
@@ -15,8 +19,6 @@ API_KEY = 'p7CVKPTamXQJchOn1d3C6mksnpNvFommnZnLHwRx'
 
 API_URLS = {
     'national_outages': 'https://api.eia.gov/v2/nuclear-outages/us-nuclear-outages/data/',
-    # 'facility_outages': 'https://api.eia.gov/v2/nuclear-outages/facility-nuclear-outages/data/',
-    # 'generator_outages': 'https://api.eia.gov/v2/nuclear-outages/generator-nuclear-outages/data/'
 }
 
 def create_url(api_url, start_date, end_date, offset=0, length=5000):
@@ -78,27 +80,12 @@ def get_insert_sql(table_name):
     if table_name == 'national_outages':
         return """INSERT INTO national_outages (period, capacity, outage, percent_outage, capacity_units, outage_units, percent_outage_units)
                  VALUES (%s, %s, %s, %s, %s, %s, %s)"""
-    elif table_name == 'facility_outages':
-        return """INSERT INTO facility_outages (period, facility_id, facility_name, capacity, outage, percent_outage, capacity_units, outage_units, percent_outage_units)
-                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
     return None
 
 def extract_values(entry, table_name):
     if table_name == 'national_outages':
         return (
             entry['period'],
-            entry.get('capacity', None),
-            entry.get('outage', None),
-            entry.get('percentOutage', None),
-            entry.get('capacity-units', None),
-            entry.get('outage-units', None),
-            entry.get('percentOutage-units', None)
-        )
-    elif table_name == 'facility_outages':
-        return (
-            entry['period'],
-            entry.get('facility', None),  
-            entry.get('facilityName', None),
             entry.get('capacity', None),
             entry.get('outage', None),
             entry.get('percentOutage', None),
@@ -113,6 +100,17 @@ def process_data(api_url, start_date, end_date, table_name):
     if data:
         save_to_mysql(data, table_name)
 
+def get_last_period():
+    # Get the latest period from the database to avoid fetching older data
+    connection = mysql.connector.connect(**DB_CONFIG)
+    cursor = connection.cursor()
+    cursor.execute("SELECT MAX(period) FROM national_outages")
+    result = cursor.fetchone()
+    cursor.close()
+    connection.close()
+    return result[0] if result[0] else None
+
+
 def first_run():
     start_date = '2020-01-01'
     end_date = datetime.datetime.now().strftime('%Y-%m-%d')
@@ -122,8 +120,29 @@ def first_run():
         print(f"Fetching data from {api_name}...")
         process_data(api_url, start_date, end_date, api_name)
 
-def main():
-    first_run()
+@app.post("/api/crawl")
+async def crawl():
+    try:
+        first_run() 
+        return {"message": "Data fetch completed successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during data fetch: {str(e)}")
+    
+# def main():
+#     # Run the initial data fetch
+#     # first_run()
 
-if __name__ == "__main__":
-    main()
+#     # Start the scheduler
+#     scheduler = BackgroundScheduler()
+#     scheduler.add_job(scheduled_task, 'interval', minutes=2)
+#     scheduler.start()
+
+#     try:
+#         # Keep the main thread alive to allow scheduled tasks to run
+#         while True:
+#             pass
+#     except (KeyboardInterrupt, SystemExit):
+#         scheduler.shutdown()
+
+# if __name__ == "__main__":
+#     main()
