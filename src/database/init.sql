@@ -1,3 +1,4 @@
+CREATE DATABASE IF NOT EXISTS nuclear_outages;
 USE nuclear_outages;
 
 CREATE TABLE IF NOT EXISTS national_outages (

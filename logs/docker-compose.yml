@@ -5,7 +5,7 @@ services:
     image: mysql:8
     container_name: mysql
     environment:
-      MYSQL_ROOT_PASSWORD: 1234
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
       MYSQL_DATABASE: nuclear_outages
     ports:
       - "6603:3306"  
@@ -30,7 +30,7 @@ services:
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root
-      DB_PASSWORD: 1234
+      DB_PASSWORD: ""
       DB_NAME: nuclear_outages
     command: ["python", "app.py"]
     networks:
@@ -49,7 +49,7 @@ services:
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root
-      DB_PASSWORD: 1234
+      DB_PASSWORD: ""
       DB_NAME: nuclear_outages
     networks:
       - my_network
